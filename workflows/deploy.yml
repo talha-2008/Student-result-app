@@ -1,0 +1,28 @@
+name: Deploy Reflex App
+
+on:
+  push:
+    branches:
+      - main # এই লাইনটি নিশ্চিত করুন যে আপনার GitHub-এর প্রধান ব্রাঞ্চের নামের সাথে মিলে যায়
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: '3.11' # এখানে আপনার ব্যবহৃত পাইথন ভার্সন দিন
+
+      - name: Install dependencies
+        run: pip install reflex
+
+      - name: Install reflex-cli
+        run: pip install reflex-cli
+
+      - name: Deploy to Reflex
+        env:
+          REFLEX_API_KEY: ${{ secrets.REFLEX_API_KEY }}
+        run: reflex deploy --no-prompt
