@@ -37,8 +37,8 @@ class ResultState(rx.State):
     """The state for the student result management app."""
     # Teacher Dashboard State
     teacher_logged_in: bool = False
-    teacher_username: str = "admin"
-    teacher_password: str = "12345"
+    teacher_username: str = "talha"
+    teacher_password: str = "258090"
     # Inputs for login form (separate from stored credentials)
     teacher_username_input: str = ""
     teacher_password_input: str = ""
@@ -198,16 +198,34 @@ class ResultState(rx.State):
                     session.add(new_student)
                     session.commit()
             except Exception as db_err:
-                # If the table doesn't exist, attempt to create it and retry once.
+                # If the table doesn't exist, attempt to create it on the same
+                # database that rx.session() is using, then retry once.
                 msg = str(db_err).lower()
                 if "no such table" in msg or isinstance(db_err, OperationalError):
-                    if SQLModel is None or create_engine is None:
-                        return rx.window_alert("Database schema missing and sqlmodel not installed to create it.")
                     try:
-                        # Create a local sqlite file-based engine and create tables.
-                        engine = create_engine("sqlite:///resultdashboard.db")
-                        SQLModel.metadata.create_all(engine)
-                        # Retry the insertion
+                        # Try to get the engine/bind from a new session and create tables there.
+                        with rx.session() as session:
+                            try:
+                                bind = session.get_bind()
+                            except Exception:
+                                bind = getattr(session, "bind", None)
+
+                            if bind is None:
+                                # As a last resort, if we have SQLModel and create_engine, create a local file.
+                                if SQLModel is None or create_engine is None:
+                                    return rx.window_alert("Database schema missing and could not determine DB engine to create it.")
+                                engine = create_engine("sqlite:///resultdashboard.db")
+                                # Create tables only if SQLModel is available.
+                                if SQLModel is None:
+                                    return rx.window_alert("Database schema missing and sqlmodel is not available to create it.")
+                                SQLModel.metadata.create_all(engine)
+                            else:
+                                # Create tables on the same bind used by the app session.
+                                if SQLModel is None:
+                                    return rx.window_alert("Database schema missing and sqlmodel is not available to create it.")
+                                SQLModel.metadata.create_all(bind)
+
+                        # Retry the insertion once after schema creation
                         with rx.session() as session:
                             new_student = Student()
                             setattr(new_student, "roll_no", roll)
