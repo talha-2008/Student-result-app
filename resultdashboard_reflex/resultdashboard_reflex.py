@@ -1,6 +1,13 @@
 # [your_project_name].py
 import reflex as rx
 from typing import Optional
+try:
+    from sqlmodel import SQLModel, create_engine
+except Exception:
+    # Defer import errors to runtime; SQLModel may not be installed in the editor.
+    SQLModel = None
+    create_engine = None
+from sqlalchemy.exc import OperationalError
 # decimal removed — not used in this module
 
 # In this editor environment we avoid importing heavy optional
@@ -30,8 +37,11 @@ class ResultState(rx.State):
     """The state for the student result management app."""
     # Teacher Dashboard State
     teacher_logged_in: bool = False
-    teacher_username: str = "talha"
-    teacher_password: str = "258090"
+    teacher_username: str = "admin"
+    teacher_password: str = "12345"
+    # Inputs for login form (separate from stored credentials)
+    teacher_username_input: str = ""
+    teacher_password_input: str = ""
     
     # Form fields
     student_name: str = ""
@@ -79,6 +89,21 @@ class ResultState(rx.State):
             self.teacher_password = str(ev if ev is not None else self.teacher_password)
         except Exception:
             self.teacher_password = str(self.teacher_password)
+
+    @rx.event
+    def set_teacher_username_input(self, ev=None):
+        try:
+            # When called from the UI the event will provide the current value.
+            self.teacher_username_input = str(ev if ev is not None else self.teacher_username_input)
+        except Exception:
+            self.teacher_username_input = str(self.teacher_username_input)
+
+    @rx.event
+    def set_teacher_password_input(self, ev=None):
+        try:
+            self.teacher_password_input = str(ev if ev is not None else self.teacher_password_input)
+        except Exception:
+            self.teacher_password_input = str(self.teacher_password_input)
 
     @rx.event
     def set_student_name(self, ev=None):
@@ -132,9 +157,15 @@ class ResultState(rx.State):
     # --- Teacher Functions ---
     @rx.event
     def teacher_login(self):
-        """Authenticates the teacher login."""
-        if self.teacher_username == "admin" and self.teacher_password == "12345":
+        """Authenticates the teacher login using the input fields compared to stored credentials."""
+        # Compare the input values against the stored credentials.
+        if (self.teacher_username_input.strip() == str(self.teacher_username)) and (
+            self.teacher_password_input.strip() == str(self.teacher_password)
+        ):
             self.teacher_logged_in = True
+            # Clear the input fields after successful login
+            self.teacher_username_input = ""
+            self.teacher_password_input = ""
             return rx.redirect("/teacher_dashboard")
         return rx.window_alert("Invalid credentials!")
 
@@ -151,20 +182,48 @@ class ResultState(rx.State):
             total_marks = bangla + english + math + science
             grade = self.calculate_grade(total_marks)
             
-            with rx.session() as session:
-                # Create instance and set attributes to avoid constructor
-                # kwarg signature checks in static analysis.
-                new_student = Student()
-                setattr(new_student, "roll_no", roll)
-                setattr(new_student, "name", self.student_name)
-                setattr(new_student, "bangla_marks", bangla)
-                setattr(new_student, "english_marks", english)
-                setattr(new_student, "math_marks", math)
-                setattr(new_student, "science_marks", science)
-                setattr(new_student, "total_marks", total_marks)
-                setattr(new_student, "grade", grade)
-                session.add(new_student)
-                session.commit()
+            try:
+                with rx.session() as session:
+                    # Create instance and set attributes to avoid constructor
+                    # kwarg signature checks in static analysis.
+                    new_student = Student()
+                    setattr(new_student, "roll_no", roll)
+                    setattr(new_student, "name", self.student_name)
+                    setattr(new_student, "bangla_marks", bangla)
+                    setattr(new_student, "english_marks", english)
+                    setattr(new_student, "math_marks", math)
+                    setattr(new_student, "science_marks", science)
+                    setattr(new_student, "total_marks", total_marks)
+                    setattr(new_student, "grade", grade)
+                    session.add(new_student)
+                    session.commit()
+            except Exception as db_err:
+                # If the table doesn't exist, attempt to create it and retry once.
+                msg = str(db_err).lower()
+                if "no such table" in msg or isinstance(db_err, OperationalError):
+                    if SQLModel is None or create_engine is None:
+                        return rx.window_alert("Database schema missing and sqlmodel not installed to create it.")
+                    try:
+                        # Create a local sqlite file-based engine and create tables.
+                        engine = create_engine("sqlite:///resultdashboard.db")
+                        SQLModel.metadata.create_all(engine)
+                        # Retry the insertion
+                        with rx.session() as session:
+                            new_student = Student()
+                            setattr(new_student, "roll_no", roll)
+                            setattr(new_student, "name", self.student_name)
+                            setattr(new_student, "bangla_marks", bangla)
+                            setattr(new_student, "english_marks", english)
+                            setattr(new_student, "math_marks", math)
+                            setattr(new_student, "science_marks", science)
+                            setattr(new_student, "total_marks", total_marks)
+                            setattr(new_student, "grade", grade)
+                            session.add(new_student)
+                            session.commit()
+                    except Exception as create_err:
+                        return rx.window_alert(f"Failed to create DB schema: {create_err}")
+                else:
+                    raise
             
             self.student_name = ""
             self.student_roll = ""
@@ -300,8 +359,8 @@ def login_page():
         rx.box(
             rx.heading("Teacher Login", size="7", margin_bottom="20px", color="#ffffff"),
             rx.vstack(
-                rx.input(placeholder="Username", on_change=ResultState.set_teacher_username, value=ResultState.teacher_username, style=INPUT_STYLE),
-                rx.input(placeholder="Password", type="password", on_change=ResultState.set_teacher_password, value=ResultState.teacher_password, style=INPUT_STYLE),
+                rx.input(placeholder="Username", on_change=ResultState.set_teacher_username_input, value=ResultState.teacher_username_input, style=INPUT_STYLE),
+                rx.input(placeholder="Password", type="password", on_change=ResultState.set_teacher_password_input, value=ResultState.teacher_password_input, style=INPUT_STYLE),
                 rx.button("Login", on_click=ResultState.teacher_login, style=BUTTON_PRIMARY_STYLE),
                 spacing="2",
             ),
