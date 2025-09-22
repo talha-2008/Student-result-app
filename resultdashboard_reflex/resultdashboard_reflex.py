@@ -30,8 +30,8 @@ class ResultState(rx.State):
     """The state for the student result management app."""
     # Teacher Dashboard State
     teacher_logged_in: bool = False
-    teacher_username: str = "admin"
-    teacher_password: str = "12345"
+    teacher_username: str = "talha"
+    teacher_password: str = "258090"
     
     # Form fields
     student_name: str = ""
@@ -274,7 +274,17 @@ INPUT_STYLE = {
     "border_radius": "8px",
     "background": "rgba(255,255,255,0.1)",
     "border": "1px solid rgba(255,255,255,0.15)",
-    "color": "#e7eaf4"
+    "color": "#e7eaf4",
+    # Make sure text is left-aligned and inputs are tall enough so
+    # placeholder text and typed text don't overlap visually.
+    "text_align": "left",
+    "height": "44px",
+    "line_height": "1.4",
+    # Add a small left padding to keep the text away from borders.
+    "padding_left": "14px",
+    "padding_right": "14px",
+    # Ensure caret color contrasts with background.
+    "caret_color": "#e7eaf4",
 }
 
 BUTTON_PRIMARY_STYLE = {
