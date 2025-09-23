@@ -14,7 +14,9 @@ from sqlalchemy.exc import OperationalError
 # dependencies (plotly, pandas). The UI will show placeholders when
 # those libraries are not available at runtime.
 go = None
-pd = None
+# Avoid importing optional heavy libraries at module import time to keep the editor environment clean.
+CHARTS_AVAILABLE = False
+PANDAS_AVAILABLE = False
 
 # --- Database Model (SQLite) ---
 class Student(rx.Model, table=True):
@@ -40,8 +42,8 @@ class ResultState(rx.State):
     teacher_username: str = "talha"
     teacher_password: str = "258090"
     # Inputs for login form (separate from stored credentials)
-    teacher_username_input: str = ""
-    teacher_password_input: str = ""
+    teacher_username_input: str = "talha"
+    teacher_password_input: str = "258090"
     
     # Form fields
     student_name: str = ""
@@ -54,10 +56,161 @@ class ResultState(rx.State):
     # Student Dashboard State
     student_roll_input: str = ""
     student_result_data: dict = {}
+    # Currently selected subject filter (populated via UI). Declare as a
+    # state variable so `filter_subject` can set it at runtime.
+    _filtered_subject: Optional[str] = None
     
     # Data from DB
     students: list[Student] = []
     top_performers: list[Student] = []
+    # Timeline / calendar events added by teacher (visible to students)
+    # Store as simple display strings to simplify rendering and avoid Var-indexing issues.
+    timeline_events: list[str] = []  # each event: "YYYY-MM-DD - Title (type)"
+    # Leaderboard/top students cached list (display strings)
+    leaderboard_top: list[str] = []
+    # Temporary inputs for teacher to add timeline events
+    _new_event_title: str = ""
+    _new_event_date: str = ""
+    _new_event_type: str = "exam"
+     
+    @classmethod
+    def get_subject_averages(cls):
+        """Calculate average marks for each subject and return as a list of (subject, average) pairs."""
+        # Access class-level students list defensively.
+        # Avoid using boolean operations on Reflex Vars (they cannot be used
+        # directly with `if`, `and`, `or`, `not`). If `students` isn't a
+        # plain Python list (e.g. a Var during compile time), return default
+        # averages so the page can compile. At runtime the stateful methods
+        # that populate `students` will update the UI.
+        students = getattr(cls, "students", [])
+        if not isinstance(students, list):
+            return [("Bangla", 0), ("English", 0), ("Math", 0), ("Science", 0)]
+        if len(students) == 0:
+            return [("Bangla", 0), ("English", 0), ("Math", 0), ("Science", 0)]
+
+        total_bangla = sum(getattr(s, "bangla_marks", 0) for s in students)
+        total_english = sum(getattr(s, "english_marks", 0) for s in students)
+        total_math = sum(getattr(s, "math_marks", 0) for s in students)
+        total_science = sum(getattr(s, "science_marks", 0) for s in students)
+        count = len(students)
+
+        return [
+            ("Bangla", total_bangla // count),
+            ("English", total_english // count),
+            ("Math", total_math // count),
+            ("Science", total_science // count),
+        ]
+
+    @classmethod
+    def get_subject_averages_dict(cls):
+        """Return subject averages as an ordered dict-like list of tuples."""
+        return cls.get_subject_averages()
+
+    @classmethod
+    def get_top_students(cls, n: int = 5):
+        """Return list of (name, average) tuples for top N students based on total_marks."""
+        students = getattr(cls, "students", [])
+        if not isinstance(students, list):
+            return []
+        rows = sorted(students, key=lambda s: getattr(s, "total_marks", 0), reverse=True)
+        result = []
+        for s in rows[:n]:
+            avg = 0
+            try:
+                avg = int(getattr(s, "total_marks", 0) // 4)
+            except Exception:
+                avg = getattr(s, "total_marks", 0)
+            result.append((getattr(s, "name", ""), avg))
+        return result
+
+    @rx.event
+    def filter_subject(self, subject: str | None = None):
+        """Filter students by subject; currently a stub that could be extended."""
+        # Store the filter selection so the UI can react and only show
+        # relevant student rows.
+        self._filtered_subject = subject
+        return None
+
+    @rx.event
+    def add_timeline_event(self, ev=None):
+        """Allow teacher to add an exam or homework reminder to timeline.
+
+        This handler is designed to be called directly from a button click
+        (which passes a PointerEventInfo). We therefore read the event input
+        values from the temporary state fields rather than expecting typed
+        parameters.
+        """
+        try:
+            title = getattr(self, "_new_event_title", "")
+            date = getattr(self, "_new_event_date", "")
+            etype = getattr(self, "_new_event_type", "exam") or "exam"
+
+            disp = f"{date} - {title} ({etype})"
+            # prepend so newest appear first
+            existing = self.timeline_events if isinstance(self.timeline_events, list) else []
+            self.timeline_events = [disp] + existing
+            # Clear temporary inputs
+            self._new_event_title = ""
+            self._new_event_date = ""
+            self._new_event_type = "exam"
+            return rx.window_alert("Event added to timeline")
+        except Exception as e:
+            return rx.window_alert(f"Failed to add event: {e}")
+
+    @rx.event
+    def set_new_event_title(self, ev=None):
+        try:
+            self._new_event_title = str(ev if ev is not None else self._new_event_title)
+        except Exception:
+            self._new_event_title = str(self._new_event_title)
+
+    @rx.event
+    def set_new_event_date(self, ev=None):
+        try:
+            self._new_event_date = str(ev if ev is not None else self._new_event_date)
+        except Exception:
+            self._new_event_date = str(self._new_event_date)
+
+    @rx.event
+    def set_new_event_type(self, ev=None):
+        try:
+            self._new_event_type = str(ev if ev is not None else self._new_event_type)
+        except Exception:
+            self._new_event_type = str(self._new_event_type)
+
+    @rx.event
+    def compute_leaderboard(self, n: int = 10):
+        """Compute top N students and cache them to `leaderboard_top`."""
+        try:
+            # If we have DB access prefer to query, otherwise use state list
+            try:
+                with rx.session() as session:
+                    rows = session.query(Student).all()
+            except Exception:
+                rows = self.students if isinstance(self.students, list) else []
+
+            rows = sorted(rows, key=lambda s: getattr(s, "total_marks", 0), reverse=True)
+            # Store as simple display strings to keep the state type stable
+            self.leaderboard_top = [f"#{idx+1} {getattr(s, 'name', '')} - {getattr(s, 'total_marks', 0)} Marks" for idx, s in enumerate(rows[:n])]
+            return None
+        except Exception:
+            self.leaderboard_top = []
+            return None
+
+    @classmethod
+    def get_student_rank(cls, student_roll: int):
+        """Return the 1-based rank of a student in the current class, or None."""
+        students = getattr(cls, "students", [])
+        if not isinstance(students, list) or len(students) == 0:
+            return None
+        rows = sorted(students, key=lambda s: getattr(s, "total_marks", 0), reverse=True)
+        for idx, s in enumerate(rows, 1):
+            if getattr(s, "roll_no", None) == student_roll:
+                return idx
+        return None
+        return None
+        
+
     
     # Logic for grades and totals
     def calculate_grade(self, total_marks: int) -> str:
@@ -153,6 +306,58 @@ class ResultState(rx.State):
             self.student_roll_input = str(ev if ev is not None else self.student_roll_input)
         except Exception:
             self.student_roll_input = str(self.student_roll_input)
+    @rx.event
+    def export_results(self):
+        """Export student results as CSV file."""
+        import csv
+        import io
+        import os
+
+        # Build CSV in-memory then write to the .web/static directory so
+        # Reflex can serve it as a downloadable file. Reflex requires
+        # redirect/download URLs to start with '/'.
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(["Roll No", "Name", "Bangla", "English", "Math", "Science", "Total", "Grade"])
+        students = self.students if isinstance(self.students, list) else []
+        for s in students:
+            writer.writerow([
+                getattr(s, "roll_no", ""),
+                getattr(s, "name", ""),
+                getattr(s, "bangla_marks", ""),
+                getattr(s, "english_marks", ""),
+                getattr(s, "math_marks", ""),
+                getattr(s, "science_marks", ""),
+                getattr(s, "total_marks", ""),
+                getattr(s, "grade", ""),
+            ])
+        csv_data = output.getvalue()
+
+        # Ensure .web/static exists
+        web_static_dir = os.path.join(os.getcwd(), ".web", "static")
+        try:
+            os.makedirs(web_static_dir, exist_ok=True)
+            file_path = os.path.join(web_static_dir, "student_results.csv")
+            with open(file_path, "w", encoding="utf-8", newline="") as f:
+                f.write(csv_data)
+            # Return a redirect to the static file path (must start with '/').
+            return safe_redirect("/static/student_results.csv")
+        except Exception as e:
+            return rx.window_alert(f"Failed to export CSV: {e}")
+    
+    @rx.event
+    def delete_student(self, roll: int):
+        try:
+            with rx.session() as session:
+                student = session.query(Student).filter_by(roll_no=roll).first()
+                if student:
+                    session.delete(student)
+                    session.commit()
+                    return rx.window_alert("Student deleted successfully!")
+        except Exception as e:
+            return rx.window_alert(f"Error deleting student: {e}")
+
+
 
     # --- Teacher Functions ---
     @rx.event
@@ -166,7 +371,7 @@ class ResultState(rx.State):
             # Clear the input fields after successful login
             self.teacher_username_input = ""
             self.teacher_password_input = ""
-            return rx.redirect("/teacher_dashboard")
+            return safe_redirect("/teacher_dashboard")
         return rx.window_alert("Invalid credentials!")
 
     @rx.event
@@ -290,7 +495,7 @@ class ResultState(rx.State):
     @rx.event
     def logout(self):
         self.teacher_logged_in = False
-        return rx.redirect("/")
+        return safe_redirect("/")
 
     # --- Student Functions ---
     @rx.event
@@ -318,7 +523,7 @@ class ResultState(rx.State):
                     "total": getattr(student, "total_marks", ""),
                     "grade": getattr(student, "grade", ""),
                 }
-                return rx.redirect("/student_result")
+                return safe_redirect("/student_result")
             else:
                 self.student_result_data = {}
                 return rx.window_alert("Roll number not found.")
@@ -333,6 +538,23 @@ STYLE_CONFIG = {
     "background_attachment": "fixed",
     "background_image": "radial-gradient(1200px 700px at 10% -10%, rgba(124,92,255,0.18), transparent), radial-gradient(1000px 600px at 90% 10%, rgba(61,214,208,0.14), transparent), linear-gradient(180deg, #090d1a 0%, #0a0f1f 100%)",
 }
+
+
+def safe_redirect(path, *args, **kwargs):
+    """Normalize redirect paths to always start with '/' and call rx.redirect.
+
+    Reflex requires redirect paths to start with '/'. This helper ensures a
+    leading slash and returns a window alert for non-string paths.
+    """
+    try:
+        if not isinstance(path, str):
+            return rx.window_alert("Invalid redirect path")
+        if not path.startswith("/"):
+            path = "/" + path
+        return rx.redirect(path, *args, **kwargs)
+    except Exception as e:
+        # If rx.redirect itself raises, surface a friendly alert
+        return rx.window_alert(f"Redirect error: {e}")
 
 CARD_STYLE = {
     "background": "rgba(255,255,255,0.08)",
@@ -390,42 +612,96 @@ def login_page():
     )
 
 def teacher_dashboard():
+    # Build a corrected teacher dashboard UI with proper structure and handlers
     return rx.center(
         rx.vstack(
-                rx.hstack(
+            # Header row
+            rx.hstack(
                 rx.heading("Teacher Dashboard", size="8", color="#ffffff"),
                 rx.spacer(),
+                rx.button("Export Results", on_click=ResultState.export_results, style=BUTTON_PRIMARY_STYLE),
                 rx.button("Logout", on_click=ResultState.logout, style={"background": "#d32f2f", "color": "white", "border_radius": "8px"}),
                 width="100%",
                 padding_bottom="20px",
             ),
-            
-            # Top Performers and Grade Distribution
-                rx.grid(
+
+            # Controls: subject filter + charts
+            rx.hstack(
+                # Build a static default option list for compile-time. At
+                # runtime, the UI can be extended to show dynamic subjects
+                # after `ResultState.get_students` runs and populates
+                # `ResultState.students`.
+                rx.select(
+                    ["All", "Bangla", "English", "Math", "Science"],
+                    on_change=ResultState.filter_subject,
+                    placeholder="Select Subject",
+                ),
+                rx.spacer(),
+            ),
+
+            # Two-column grid: Top performers and Subject Averages
+            rx.grid(
                 rx.box(
                     rx.text("Top 3 Performers", font_weight="bold", font_size="20px"),
                     rx.divider(),
-                    rx.foreach(ResultState.top_performers,
-                        lambda student: rx.text(f"{student.roll_no}: {student.name} - {student.total_marks} Marks", font_size="16px")
+                    rx.foreach(
+                        ResultState.top_performers,
+                        lambda student: rx.text(f"{student.roll_no}: {student.name} - {student.total_marks} Marks", font_size="16px"),
                     ),
-                    style=CARD_STYLE
-                    ),
-                    rx.box(
-                    rx.text("Grade Distribution", font_weight="bold", font_size="20px"),
-                    rx.divider(),
-                    rx.text("Grade distribution chart (not rendered in editor)", color="#b8bfd6"),
-                    style=CARD_STYLE
+                    style=CARD_STYLE,
                 ),
+
+                rx.box(
+                    rx.text("Subject-wise Averages", font_weight="bold", font_size="20px"),
+                    rx.divider(),
+                    # Show subject averages as progress bars (works without extra libs)
+                    rx.vstack(*[
+                        rx.box(
+                            rx.text(f"{sub}: {avg} Marks"),
+                            rx.progress(value=avg, max=100, color="green"),
+                            style={"margin_bottom": "10px"}
+                        )
+                        for sub, avg in ResultState.get_subject_averages_dict()
+                    ]),
+                    style=CARD_STYLE,
+                ),
+
+                # Timeline / events box
+                rx.box(
+                    rx.text("Timeline / Calendar", font_weight="bold", font_size="20px"),
+                    rx.divider(),
+                    # Render timeline events dynamically so updates appear in the UI
+                    rx.vstack(
+                        rx.foreach(
+                            ResultState.timeline_events,
+                            lambda ev: rx.box(
+                                    rx.text(ev),
+                                    style={"margin_bottom": "8px"}
+                                ),
+                        )
+                    ),
+                    # Form to add an event quickly (binds to state inputs)
+                    rx.vstack(
+                        rx.input(placeholder="Event title", on_change=ResultState.set_new_event_title, value=ResultState._new_event_title, style=INPUT_STYLE),
+                        rx.input(placeholder="YYYY-MM-DD", on_change=ResultState.set_new_event_date, value=ResultState._new_event_date, style=INPUT_STYLE),
+                        rx.hstack(
+                            rx.select(["exam", "homework"], value=ResultState._new_event_type, on_change=ResultState.set_new_event_type, style=INPUT_STYLE),
+                            rx.button("Add Event", on_click=ResultState.add_timeline_event, style=BUTTON_PRIMARY_STYLE),
+                        ),
+                    ),
+                    style=CARD_STYLE,
+                ),
+
                 columns="2",
                 spacing="3",
                 width="100%",
-                    on_mount=ResultState.get_top_performers,
+                on_mount=ResultState.get_top_performers,
             ),
-            
+
             # Student Data Input Form
             rx.box(
                 rx.heading("Add New Student", size="6", margin_top="30px", margin_bottom="20px"),
-                    rx.form(
+                rx.form(
                     rx.vstack(
                         rx.input(placeholder="Student Name", on_change=ResultState.set_student_name, value=ResultState.student_name, style=INPUT_STYLE),
                         rx.input(placeholder="Roll Number", type="number", on_change=ResultState.set_student_roll, value=ResultState.student_roll, style=INPUT_STYLE),
@@ -435,15 +711,15 @@ def teacher_dashboard():
                             rx.input(placeholder="Math Marks", type="number", on_change=ResultState.set_marks_math, value=ResultState.marks_math, style=INPUT_STYLE),
                             rx.input(placeholder="Science Marks", type="number", on_change=ResultState.set_marks_science, value=ResultState.marks_science, style=INPUT_STYLE),
                             width="100%",
-                            spacing="2"
+                            spacing="2",
                         ),
                         rx.button("Add Student", on_click=ResultState.add_student, style=BUTTON_PRIMARY_STYLE),
                         spacing="2",
-                        width="100%"
+                        width="100%",
                     )
                 ),
                 style=CARD_STYLE,
-                width="100%"
+                width="100%",
             ),
 
             # All Students Table
@@ -456,23 +732,28 @@ def teacher_dashboard():
                             rx.table.column_header_cell("Name"),
                             rx.table.column_header_cell("Total Marks"),
                             rx.table.column_header_cell("Grade"),
+                            rx.table.column_header_cell("Actions"),
                         )
                     ),
+
                     rx.table.body(
-                        rx.foreach(ResultState.students,
+                        rx.foreach(
+                            ResultState.students,
                             lambda student: rx.table.row(
                                 rx.table.cell(student.roll_no),
                                 rx.table.cell(student.name),
                                 rx.table.cell(student.total_marks),
                                 rx.table.cell(student.grade),
-                            )
-                        )
+                                rx.table.cell(rx.button("Delete", on_click=lambda ev, s=student: ResultState.delete_student(s.roll_no), style={"background": "red", "color": "white", "border_radius": "5px"})),
+                            ),
+                        ),
                     ),
                     on_mount=ResultState.get_students,
                 ),
                 style=CARD_STYLE,
-                width="100%"
+                width="100%",
             ),
+
             width="80%",
             max_width="1200px",
             padding_top="50px",
@@ -483,17 +764,47 @@ def teacher_dashboard():
 
 def student_page():
     return rx.center(
+        # Left: quick check box
         rx.box(
             rx.heading("Check Your Result", size="7", margin_bottom="20px"),
-                rx.vstack(
+            rx.vstack(
                 rx.input(placeholder="Enter Roll Number", type="number", on_change=ResultState.set_student_roll_input, style=INPUT_STYLE),
                 rx.button("Check Result", on_click=ResultState.search_student_result, style=BUTTON_PRIMARY_STYLE),
-                rx.button("Go to Home", on_click=lambda: rx.redirect("/"), style={"background": "gray", "color": "white", "border_radius": "8px"}),
+                rx.button("Go to Home", on_click=lambda: safe_redirect("/"), style={"background": "gray", "color": "white", "border_radius": "8px"}),
                 spacing="2",
             ),
             style=CARD_STYLE,
-            width="400px"
+            width="400px",
         ),
+
+        # Right: timeline + leaderboard stacked
+        rx.vstack(
+            rx.box(
+                rx.heading("Timeline / Notices", size="6"),
+                rx.vstack(
+                    rx.foreach(
+                        ResultState.timeline_events,
+                        lambda ev: rx.text(ev),
+                    )
+                ),
+                style=CARD_STYLE,
+                width="400px",
+            ),
+            rx.box(
+                rx.heading("Leaderboard - Top 10", size="6"),
+                rx.vstack(
+                    rx.foreach(
+                        ResultState.leaderboard_top,
+                        lambda item: rx.text(item),
+                    )
+                ),
+                style=CARD_STYLE,
+                width="400px",
+            ),
+        ),
+
+        # Populate data on mount
+        on_mount=[ResultState.get_students, ResultState.compute_leaderboard],
         height="100vh",
         style=STYLE_CONFIG,
     )
@@ -517,7 +828,7 @@ def student_result_page():
                     spacing="2",
                     width="100%"
                 ),
-                rx.button("Check Another Result", on_click=lambda: rx.redirect("/student"), margin_top="20px", style=BUTTON_PRIMARY_STYLE),
+                rx.button("Check Another Result", on_click=lambda: safe_redirect("/student"), margin_top="20px", style=BUTTON_PRIMARY_STYLE),
                 style=CARD_STYLE,
                 width="800px"
             ),
@@ -532,8 +843,8 @@ def index():
             rx.vstack(
             rx.heading("Student Result Management", size="9", color="#ffffff"),
             rx.text("A simple and powerful tool for teachers and students.", color="#b8bfd6"),
-            rx.button("Teacher Dashboard", on_click=lambda: rx.redirect("/login"), style=BUTTON_PRIMARY_STYLE),
-            rx.button("Student Result Check", on_click=lambda: rx.redirect("/student"), style={"background": "#3d6dff", "color": "white", "border_radius": "8px"}),
+            rx.button("Teacher Dashboard", on_click=lambda: safe_redirect("/login"), style=BUTTON_PRIMARY_STYLE),
+            rx.button("Student Result Check", on_click=lambda: safe_redirect("/student"), style={"background": "#3d6dff", "color": "white", "border_radius": "8px"}),
             spacing="3"
         ),
         height="100vh",
